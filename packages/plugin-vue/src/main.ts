@@ -215,7 +215,7 @@ export async function transformMain(
   } else {
     output.push(
       `import _export_sfc from '${EXPORT_HELPER_ID}'`,
-      `export default /*#__PURE__*/_export_sfc(_sfc_main, [${attachedProps
+      `export default _export_sfc(_sfc_main, [${attachedProps
         .map(([key, val]) => `['${key}',${val}]`)
         .join(',')}])`,
     )
