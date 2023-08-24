@@ -20,10 +20,10 @@ import {
   resolveScript,
   scriptIdentifier,
 } from './script'
+import injectIntoComponent from './injection'
 import { transformTemplateInMain } from './template'
 import { isEqualBlock, isOnlyTemplateChanged } from './handleHotUpdate'
 import { createRollupError } from './utils/error'
-import { EXPORT_HELPER_ID } from './helper'
 import type { ResolvedOptions } from '.'
 
 // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
@@ -104,12 +104,10 @@ export async function transformMain(
   // custom blocks
   const customBlocksCode = await genCustomBlockCode(descriptor, pluginContext)
 
-  const output: string[] = [
-    scriptCode,
-    templateCode,
-    stylesCode,
-    customBlocksCode,
-  ]
+  const output: string[] = [templateCode, stylesCode, customBlocksCode]
+  // Call back functions to be added to rewritten IIFE.
+  const attachedHooks: ((expr: string) => string | string[])[] = []
+
   if (hasScoped) {
     attachedProps.push([`__scopeId`, JSON.stringify(`data-v-${descriptor.id}`)])
   }
@@ -128,10 +126,11 @@ export async function transformMain(
     !ssr &&
     !isProduction
   ) {
-    output.push(`_sfc_main.__hmrId = ${JSON.stringify(descriptor.id)}`)
-    output.push(
-      `typeof __VUE_HMR_RUNTIME__ !== 'undefined' && ` +
-        `__VUE_HMR_RUNTIME__.createRecord(_sfc_main.__hmrId, _sfc_main)`,
+    attachedProps.push(['__hmrId', JSON.stringify(descriptor.id)])
+    attachedHooks.push(
+      (expr) =>
+        `typeof __VUE_HMR_RUNTIME__ !== 'undefined' && ` +
+        `__VUE_HMR_RUNTIME__.createRecord(${expr}.__hmrId, ${expr})`,
     )
     // check if the template is the only thing that changed
     if (prevDescriptor && isOnlyTemplateChanged(prevDescriptor, descriptor)) {
@@ -155,17 +154,19 @@ export async function transformMain(
     const normalizedFilename = normalizePath(
       path.relative(options.root, filename),
     )
-    output.push(
+    output.unshift(
       `import { useSSRContext as __vite_useSSRContext } from 'vue'`,
-      `const _sfc_setup = _sfc_main.setup`,
-      `_sfc_main.setup = (props, ctx) => {`,
+    )
+    attachedHooks.push((expr) => [
+      `const { setup } = ${expr}`,
+      `${expr}.setup = (props, ctx) => {`,
       `  const ssrContext = __vite_useSSRContext()`,
       `  ;(ssrContext.modules || (ssrContext.modules = new Set())).add(${JSON.stringify(
         normalizedFilename,
       )})`,
-      `  return _sfc_setup ? _sfc_setup(props, ctx) : undefined`,
+      `  return setup ? setup(props, ctx) : undefined`,
       `}`,
-    )
+    ])
   }
 
   let resolvedMap: RawSourceMap | undefined = undefined
@@ -210,16 +211,8 @@ export async function transformMain(
     }
   }
 
-  if (!attachedProps.length) {
-    output.push(`export default _sfc_main`)
-  } else {
-    output.push(
-      `import _export_sfc from '${EXPORT_HELPER_ID}'`,
-      `export default _export_sfc(_sfc_main, [${attachedProps
-        .map(([key, val]) => `['${key}',${val}]`)
-        .join(',')}])`,
-    )
-  }
+  // Inject attached props and hooks into script code
+  output.push(injectIntoComponent(scriptCode, attachedProps, attachedHooks))
 
   // handle TS transpilation
   let resolvedCode = output.join('\n')
@@ -321,24 +314,7 @@ async function genScriptCode(
     // If the script is js/ts and has no external src, it can be directly placed
     // in the main module.
     if (canInlineMain(descriptor, options)) {
-      if (!options.compiler.version) {
-        // if compiler-sfc exposes no version, it's < 3.3 and doesn't support
-        // genDefaultAs option.
-        const userPlugins = options.script?.babelParserPlugins || []
-        const defaultPlugins =
-          script.lang === 'ts'
-            ? userPlugins.includes('decorators')
-              ? (['typescript'] as const)
-              : (['typescript', 'decorators-legacy'] as const)
-            : []
-        scriptCode = options.compiler.rewriteDefault(
-          script.content,
-          scriptIdentifier,
-          [...defaultPlugins, ...userPlugins],
-        )
-      } else {
-        scriptCode = script.content
-      }
+      scriptCode = script.content
       map = script.map
     } else {
       if (script.src) {
@@ -350,8 +326,14 @@ async function genScriptCode(
       const srcQuery = script.src ? `&src=true` : ``
       const query = `?vue&type=script${srcQuery}${attrsQuery}`
       const request = JSON.stringify(src + query)
-      scriptCode =
-        `import _sfc_main from ${request}\n` + `export * from ${request}` // support named exports
+      // The 'facade' module
+      scriptCode = [
+        `import sfc_main from ${request}`,
+        // support named exports
+        `export * from ${request}`,
+        // Use injection condition 2
+        `export default sfc_main`,
+      ].join('\n')
     }
   }
   return {

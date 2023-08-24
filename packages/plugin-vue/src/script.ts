@@ -69,9 +69,6 @@ export function resolveScript(
     reactivityTransform: options.reactivityTransform !== false,
     templateOptions: resolveTemplateCompilerOptions(descriptor, options, ssr),
     sourceMap: options.sourceMap,
-    genDefaultAs: canInlineMain(descriptor, options)
-      ? scriptIdentifier
-      : undefined,
   })
 
   if (!options.isProduction && resolved?.deps) {
